@@ -2,6 +2,10 @@
 # This file contains configuration flags to customize your site
 #
 
+#latex
+markdown: kramdown
+#latex
+
 # Name of your site (displayed in the header)
 name: "Qiyu Wu's blog"
 # Short bio or description (displayed in the header)
