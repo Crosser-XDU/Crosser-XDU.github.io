@@ -1,0 +1,204 @@
+## RLHF 技术笔记--从策略梯度到DPO
+
+随着大语言模型的火热兴起，许多新的技术被运用，其中RLHF（Reinforcement Learning with Human Feedback）作为对大模型进行对齐的一种重要的方法受到了许多关注。本文将首先从最基本的策略梯度开始介绍PPO这一RLHF中最常用的方法，然后再介绍一下去年提出的比较新的DPO算法。
+
+### 策略梯度
+
+强化学习算法可以分为两大类：基于值函数的强化学习和基于策略的强化学习。
+
+**基于值函数的强化学习**：
+
+通过递归地求解贝尔曼方程来维护Q值函数，每次选择动作时会选择该状态下对应Q值最大的动作，使得未来积累的期望奖励值最大。经典的基于值函数的强化学习算法有Value Iteration、Q-Learning、SARSA、DQN算法等。这些算法在学习后的Q值函数不再发生变化，每次做出的策略也是一定的，可以理解为确定性策略。
+
+**基于策略的强化学习**：
+
+不再通过价值函数来确定选择动作的策略，而是直接学习策略本身，通过一组参数$\theta$对策略进行参数化，并通过神经网络方法优化 $\theta$。
+
+基于策略的强化学习用参数化概率分布$\pi_\theta(a\mid s) = P(a\mid s;\theta)$代替了基于值函数的强化学习中的确定性策略$\pi:s \rightarrow a$，在返回的动作概率列表中对不同的动作进行抽样选择。
+
+介绍了基于策略的强化学习这一概念，我们可以定义以下目标函数$J(\theta)$来更新我们的策略参数。
+$$
+\max\limits_\theta J(\theta)=\max\limits_\theta E_{\tau\sim\pi_\theta}R(\tau)=\max\limits_\theta\sum\limits_\tau P(\tau;\theta)R(\tau)
+$$
+我们的目标就是找到那些可能获得更多奖励的动作，使它们对应的概率更大，从而策略就更有可能选择这些动作。其中$\tau$是智能体和环境交互所产生的轨迹$\tau=(s_1,a_1,\ldots,s_T,a_T)$， 接下来我们给出在策略$\pi_\theta(a\mid s)$下产生这样一个轨迹的概率为：
+$$
+P(\tau;\theta)=\left[\prod_{t=0}^{T}P\left(s_{t+1}\mid s_{t},a_{t}\right)\cdot\pi_{\theta}\left(a_{t}\mid s_{t}\right)\right]
+$$
+为了优化上述的表达式，我们需要求出其导数
+$$
+\begin{aligned}
+\nabla_{\theta}J(\theta)& =\sum_{\tau}\nabla_{\theta}P(\tau;\theta)R(\tau)  \\
+&=\sum_{\tau}P(\tau;\theta)\frac{\nabla_{\theta}P(\tau;\theta)}{P(\tau;\theta)}R(\tau) \\
+&=\sum_{\tau}P(\tau;\theta)\nabla_{\theta}\log P(\tau;\theta)R(\tau) \\
+&=\mathbb{E}_{\tau\sim\pi_\theta}\nabla_\theta\log P(\tau;\theta)R(\tau)
+\end{aligned}
+$$
+推导过程中使用了对数导数技巧，将$P(\tau;\theta)$表示为对数的形式，从而可以更方便地将其拆解为：
+$$
+\begin{aligned}
+\nabla_{\theta}\log P(\tau;\theta)& =\nabla_\theta\left[\sum_{t=0}^T\log P\left(s_{t+1}\mid s_t,a_t\right)+\sum_{t=0}^T\log\pi_\theta\left(a_t\mid s_t\right)\right]  \\
+&=\sum_{t=0}^T\nabla_\theta\log\pi_\theta(a_t\mid s_t)
+\end{aligned}
+$$
+其中最后一个等式是因为第一项和策略参数无关。
+
+虽然我们得出了和策略相关的梯度表达式，但是要求出具体的梯度值还需要对不同的轨迹求期望，这在实际中是不能做到的，所以这里我们使用多次采样得到的样本值来估计来得出梯度的近似。这也是Monte Carlo方法的运用。
+$$
+\begin{aligned}
+\nabla_{\theta}J(\theta)& \approx\frac1m\sum_{i=1}^m\nabla_\theta\log P(\tau^{(i)};\theta)R(\tau^{(i)})  \\
+&=\frac{1}{m}\sum_{i=1}^{m}(\sum_{t^{(i)}=0}^{T^{(i)}}\nabla_{\theta}\log\pi_{\theta}(a_{t^{(i)}}\mid s_{t^{(i)}}))R(\tau^{(i)}) \\
+&\approx\frac1n\sum_{i=1}^n(\nabla_\theta\log\pi_\theta(a_{t^{(i)}}\mid s_{t^{(i)}}))R(t^{(i)})
+\end{aligned}
+$$
+现在我们就可以对参数进行梯度更新了
+$$
+\theta\leftarrow\theta+\alpha\nabla_\theta J(\theta)
+$$
+
+### REINFORCE算法
+
+![img](https://miro.medium.com/v2/resize:fit:1400/format:webp/1*-FOeTBdZkezT5ICEXmBs1w.png)
+
+如上是REINFORCE算法的伪代码。
+
+REINFORCE算法是Williams提出的经典的策略梯度算法之一，算法思路简介明了，是最简单的基于似然比的策略梯度强化学习算法。
+
+
+
+### NPG（Natural Policy Gradient）算法
+
+上述算法固然简单，但是也有许多不足，在实际应用过程中，发现该算法无法解决梯度更新中两个比较常见问题：
+
+Overshooting：更新错过了奖励峰值并落入了次优策略区域
+
+Undershooting：在梯度方向上采取过小的更新步长会导致收敛缓慢
+
+在监督学习问题中，overshooting并不是什么大问题，因为数据是固定的，我们可以在下一个epoch中重新纠正，但在强化学习问题中，如果因为overshooting陷入了一个较差的策略区域，则未来的样本批次可能不会提供太多有意义的信息，用较差的数据样本再去更新策略，从而陷入了糟糕的正反馈中无法恢复。使用较小的学习率可能会解决这个问题，但会导致收敛速度变慢的undershooting问题。
+
+而NPG算法为了解决这个问题，引入KL散度来对梯度更新进行限制来解决Overshooting的问题，同时为了时更新足够充分，在这样的限制下寻找最大的更新梯度。
+
+更新前后KL散度：
+$$
+\mathcal{D}_{\mathrm{KL}}(\pi_\theta\parallel\pi_{\theta+\Delta\theta})=\sum_{x\in\mathcal{X}}\pi_\theta(x)\log\biggl(\frac{\pi_\theta(x)}{\pi_{\theta+}\Delta\theta(x)}\biggr)
+$$
+策略更新为：
+$$
+\Delta\theta^*=\underset{\mathcal{D}_{\mathrm{KL}}(\pi_\theta\|\pi_{\theta+\Delta\theta})\leq\epsilon}{\operatorname*{argmax}}J(\theta+\Delta\theta)
+$$
+使用罚函数将上面的约束问题转化为无约束问题
+$$
+\Delta\theta^*=\arg\max_{\Delta\theta}J(\theta+\Delta\theta)-\lambda(\mathcal{D}_{\mathrm{KL}}(\pi_\theta\parallel\pi_{\theta+\Delta\theta})-\epsilon)
+$$
+再通过泰勒展开，结合KL散度的梯度的性质，我们可以得到
+$$
+\Delta\theta^{*}\approx\arg\max_{\Delta\theta}J(\theta_{\mathrm{old}})+\nabla_{\theta}J(\theta)|_{\theta=\theta_{\mathrm{old}}}\cdot\Delta\theta-\frac12\lambda\left(\Delta\theta^\top\nabla_\theta^2\mathcal{D}_{\mathrm{KL}}(\pi_{\theta_{\mathrm{old}}}\parallel\pi_\theta)|_{\theta=\theta_{\mathrm{old}}}\Delta\theta\right)+\lambda\epsilon
+$$
+注意到这里有对KL散度的二阶导数，我们用Fisher矩阵来代替，然后再删除和$\theta$无关的量，得到
+$$
+\Delta\theta^*\approx\arg\max_{\Delta\theta}\nabla_\theta J(\theta)|_{\theta=\theta_{\mathrm{old}}}\cdot\Delta\theta-\frac12\lambda(\Delta\theta^\top F(\theta_{\mathrm{old}})\Delta\theta)
+$$
+让该梯度为0，我们得到
+$$
+\Delta\theta=\sqrt{\frac{2\epsilon}{\nabla J(\theta)^\top F(\theta)^{-1}\nabla J(\theta)}}\tilde{\nabla}J(\theta)
+$$
+具体算法伪代码如下：
+
+![img](https://miro.medium.com/v2/resize:fit:828/format:webp/1*_0YmeAExNUx9G3IF4xwVcQ.png)
+
+
+
+### PPO算法
+
+为了解决NPG算法中对梯度更新中存在大量近似，而无法给出算法改进的保障这一问题，TRPO使用优势函数来衡量策略更新的大小。
+
+优势函数定义为：
+$$
+A^{\pi_\theta}(s,a)=\mathbb{E}\left(Q^{\pi_\theta}(s,a)-V^{\pi_\theta}(s)\right)
+$$
+使用优势函数，我们可以给出梯度的另一种估计形式
+$$
+\hat{g}=\hat{\mathbb{E}}_t\left[\nabla_\theta\log\pi_\theta(a_t\mid s_t)\hat{A}_t\right]
+$$
+TRPO中使用重要性采样来使得采样无偏，并且给出信任域这一概念，有如下优化问题
+$$
+\begin{aligned}&\underset{\theta}{\operatorname*{maximize}}\quad\hat{\mathbb{E}}_t\left[\frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\mathrm{old}}}(a_t\mid s_t)}\hat{A}_t\right]\\&\mathrm{subject~to}\quad\hat{\mathbb{E}}_t[\mathrm{KL}[\pi_{\theta_{\mathrm{old}}}(\cdot\mid s_t),\pi_\theta(\cdot\mid s_t)]]\leq\delta.\end{aligned}
+$$
+转化为无约束问题为
+$$
+\operatorname*{maximize}_\theta\hat{\mathbb{E}}_t\left[\frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{\mathrm{old}}}(a_t\mid s_t)}\hat{A}_t-\beta\operatorname{KL}[\pi_{\theta_{\mathrm{old}}}(\cdot\mid s_t),\pi_\theta(\cdot\mid s_t)]\right]
+$$
+但是在实际问题中，$\beta$的选取是个问题，于是PPO中提出使用Clip的方法限制变化范围，还提出使用一种动态变化$\beta$值的方法来解决上述问题。
+
+![img](https://miro.medium.com/v2/resize:fit:828/format:webp/1*2fD_6bgEjZOztFZyig74Aw.png)
+
+### DPO算法
+
+和之前RLHF的方法一样，DPO使用了常用的Bradley-Terry (BT)模型来量化偏好。具体过程如下：
+
+对于一对偏好数据$(x, y_w, y_l)$，其中y——w为对于x偏好的回答，y——l为对于x不偏好的回答，模型认为这两个回答背后都有一个潜在的奖励值$r^*(x,y)$，并且偏好是由下面的概率决定的：
+$$
+p^*(y_1\succ y_2\mid x)=\frac{\exp\left(r^*(x,y_1)\right)}{\exp\left(r^*(x,y_1)\right)+\exp\left(r^*(x,y_2)\right)}.
+$$
+对于一组从上面的概率采样出的偏好数据$\mathcal{D}=\left\{x^{(i)},y_w^{(i)},y_l^{(i)}\right\}_{i=1}^N$，我们就有如下的负似然损失：
+$$
+\mathcal{L}_R(r_\phi,\mathcal{D})=-\mathbb{E}_{(x,y_w,y_l)\sim\mathcal{D}}\left[\log\sigma(r_\phi(x,y_w)-r_\phi(x,y_l))\right]
+$$
+ 在传统RLHF中，算法将最小化该损失来得到对$r^*$的估计$r_\phi$，并且利用该奖励模型在RL阶段优化下面这个目标函数：
+$$
+\max_{\pi_\theta}\mathbb{E}_{x\sim\mathcal{D},y\sim\pi_\theta(y|x)}\begin{bmatrix}r_\phi(x,y)\end{bmatrix}-\beta\mathbb{D}_{\mathbf{KL}}\begin{bmatrix}\pi_\theta(y\mid x)\parallel\pi_{\mathrm{ref}}(y\mid x)\end{bmatrix}
+$$
+其中第一项是为了最大化模型输出的奖励，后一项是为了不让训练后的模型和原来的模型有太大的偏移。
+
+
+
+传统的RLHF对上述的目标函数使用PPO等算法来逼近最优解，而在DPO中，作者对上述目标函数进行了求解。过程如下：
+$$
+\begin{aligned}
+\max_{\pi}\mathbb{E}_{x\sim\mathcal{D},y\sim\pi}& \begin{bmatrix}r(x,y)\end{bmatrix}-\beta\mathbb{D}_{\text{KL}}\begin{bmatrix}\pi(y|x)&\mid\mid\pi_{\text{ref}}(y|x)\end{bmatrix}  \\
+&=\max_\pi\mathbb{E}_{x\thicksim\mathcal{D}}\mathbb{E}_{y\thicksim\pi(y|x)}\left[r(x,y)-\beta\log\frac{\pi(y|x)}{\pi_{\mathsf{ref}}(y|x)}\right] \\
+&=\min_\pi\mathbb{E}_{x\sim\mathcal{D}}\mathbb{E}_{y\sim\pi(y|x)}\left[\log\frac{\pi(y|x)}{\pi_{\mathrm{ref}}(y|x)}-\frac1\beta r(x,y)\right] \\
+&=\min_\pi\mathbb{E}_{x\sim\mathcal{D}}\mathbb{E}_{y\sim\pi(y|x)}\left[\log\frac{\pi(y|x)}{\frac1{Z(x)}\pi_{\text{ref}}(y|x)\exp\left(\frac1\beta r(x,y)\right)}-\log Z(x)\right]
+\end{aligned}
+$$
+
+
+其中，
+$$
+Z(x)=\sum_y\pi_\text{ref}(y|x)\exp\left(\frac1\beta r(x,y)\right)
+$$
+当我们进行如下定义后
+$$
+\pi^*(y|x)=\frac1{Z(x)}\pi_\text{ref}(y|x)\exp\left(\frac1\beta r(x,y)\right)
+$$
+便得到了
+$$
+\min_\pi\mathbb{E}_{x\sim\mathcal{D}}\left[\mathbb{E}_{y\sim\pi(y|x)}\left[\log\frac{\pi(y|x)}{\pi^*(y|x)}\right]-\log Z(x)\right]=\\\min_\pi\mathbb{E}_{x\sim\mathcal{D}}\left[\mathbb{D}_{\mathrm{KL}}(\pi(y|x)\parallel\pi^*(y|x))-\log Z(x)\right]
+$$
+可以很显然地看出，为了是整个最小，KL散度需要为0，也就得出了最优解
+$$
+\pi(y|x)=\pi^*(y|x)=\frac1{Z(x)}\pi_{\text{ref}}(y|x)\exp\left(\frac1\beta r(x,y)\right)
+$$
+得到最优解后，我们也可以发现这个解是非常难以估算的，这也是为什么强化学习在这个地方被引入的原因。
+
+将上面得到的最优解进行巧妙地变形，得到
+$$
+r(x,y)=\beta\log\frac{\pi_r(y\mid x)}{\pi_{\mathrm{ref}}(y\mid x)}+\beta\log Z(x).
+$$
+再将得到的这个表达式代入之前所说的奖励偏好模型中，便可以得到
+$$
+p^*(y_1\succ y_2\mid x)=\frac1{1+\exp\left(\beta\log\frac{\pi^*(y_2\mid x)}{\pi_{\mathrm{ref}}(y_2\mid x)}-\beta\log\frac{\pi^*(y_1\mid x)}{\pi_{\mathrm{ref}}(y_1\mid x)}\right)}
+$$
+可以看到，因为偏好只依赖于两者之差，表示prompt x的Z（x）被消除了。像之前一样，我们便得到了DPO的Loss函数：
+$$
+\mathcal{L}_{\mathrm{DPO}}(\pi_\theta;\pi_{\mathrm{ref}})=-\mathbb{E}_{(x,y_w,y_l)\thicksim\mathcal{D}}\left[\log\sigma\left(\beta\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\mathrm{ref}}(y_w\mid x)}-\beta\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\mathrm{ref}}(y_l\mid x)}\right)\right]
+$$
+求导，得到
+$$
+\begin{aligned}&\nabla_\theta\mathcal{L}_{\mathrm{DPO}}(\pi_\theta;\pi_{\mathrm{ref}})=\\&-\beta\mathbb{E}_{(x,y_w,y_l)\thicksim\mathcal{D}}\left[\quad{\sigma(\hat{r}_\theta(x,y_l)-\hat{r}_\theta(x,y_w))}\quad\left[\quad{\nabla_\theta\log\pi(y_w\mid x)}-{\nabla_\theta\log\pi(y_l\mid x)}\right]\right]\end{aligned}
+$$
+其中，
+$$
+\hat{r}_\theta(x,y)=\beta\log\frac{\pi_\theta(y|x)}{\pi_{\mathrm{ref}}(y|x)}
+$$
+可看出，这个隐含的奖励函数只由策略函数决定。
+
